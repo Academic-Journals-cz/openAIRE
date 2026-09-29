@@ -8,7 +8,7 @@
  * Distributed under the GNU GPL v3. For full terms see the file docs/COPYING.
  *
  * @brief Unit tests for the OpenAIRE COAR/DataCite format's version-relation
- *  (datacite:relatedIdentifiers) generation.
+ *  (datacite:relatedIdentifiers) and funding reference generation.
  */
 
 namespace APP\plugins\generic\openAIRE\tests\functional;
@@ -23,6 +23,7 @@ use Mockery;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\MockObject\MockObject;
 use PKP\core\Dispatcher;
+use PKP\funder\Funder;
 use PKP\publication\enums\VersionRelationType;
 use PKP\tests\PKPTestCase;
 use ReflectionMethod;
@@ -181,5 +182,83 @@ class OAIMetadataFormat_OpenAIRETest extends PKPTestCase
 		// at the site level - see the pkp-lib#12950 review findings for the same
 		// bug in Dc11SchemaArticleAdapter.php.
 		$this->assertStringContainsString('https://example.org/test-journal/article/view/5/version/2', $result);
+	}
+
+	/**
+	 * Invoke the protected getFundingReferences() method for an article with the given funders.
+	 */
+	private function invokeFundingReferences(array $funders): ?string
+	{
+		// Funder::getLocalizedData() builds its locale fallback chain from the request.
+		$this->mockRequest();
+		$article = new Submission();
+		$article->setData('locale', 'en');
+		$article->setData('funders', collect($funders));
+		$format = new OAIMetadataFormat_OpenAIRE('oai_openaire', '', '');
+		$method = new ReflectionMethod($format, 'getFundingReferences');
+		return $method->invoke($format, $article);
+	}
+
+	private function createFunder(array $name, ?string $ror = null, array $grants = []): Funder
+	{
+		$funder = new Funder();
+		$funder->name = $name;
+		$funder->ror = $ror;
+		$funder->grants = $grants;
+		return $funder;
+	}
+
+	public function testNoFundersMeansNoFundingReferences(): void
+	{
+		$this->assertNull($this->invokeFundingReferences([]));
+	}
+
+	public function testRorIsTypedOtherBecauseOpenAireSchemaHasNoRorType(): void
+	{
+		$result = $this->invokeFundingReferences([
+			$this->createFunder(['en' => 'European Commission'], 'https://ror.org/00k4n6c32'),
+		]);
+
+		$this->assertStringContainsString('<oaire:funderName>European Commission</oaire:funderName>', $result);
+		$this->assertStringContainsString('<oaire:funderIdentifier funderIdentifierType="Other">https://ror.org/00k4n6c32</oaire:funderIdentifier>', $result);
+		$this->assertStringNotContainsString('Crossref Funder ID', $result);
+		$this->assertStringNotContainsString('oaire:awardNumber', $result);
+		$this->assertSame(1, substr_count($result, '<oaire:fundingReference>'));
+	}
+
+	public function testEachGrantGetsItsOwnFundingReference(): void
+	{
+		$result = $this->invokeFundingReferences([
+			$this->createFunder(['en' => 'European Commission'], 'https://ror.org/00k4n6c32', [
+				['grantNumber' => '101000001', 'grantDoi' => '10.3030/101000001', 'grantName' => 'Project One'],
+				['grantNumber' => '101000002'],
+			]),
+		]);
+
+		$this->assertSame(2, substr_count($result, '<oaire:fundingReference>'));
+		$this->assertSame(2, substr_count($result, '<oaire:funderName>European Commission</oaire:funderName>'));
+		$this->assertStringContainsString('<oaire:awardNumber awardURI="https://doi.org/10.3030/101000001">101000001</oaire:awardNumber>', $result);
+		$this->assertStringContainsString('<oaire:awardTitle>Project One</oaire:awardTitle>', $result);
+		$this->assertStringContainsString('<oaire:awardNumber>101000002</oaire:awardNumber>', $result);
+	}
+
+	public function testGrantDoiStandsInAsAwardNumberWhenNumberIsMissing(): void
+	{
+		$result = $this->invokeFundingReferences([
+			$this->createFunder(['en' => 'Wellcome Trust'], null, [
+				['grantDoi' => '10.35802/123456'],
+			]),
+		]);
+
+		$this->assertStringContainsString('<oaire:awardNumber awardURI="https://doi.org/10.35802/123456">10.35802/123456</oaire:awardNumber>', $result);
+		$this->assertStringNotContainsString('oaire:funderIdentifier', $result);
+	}
+
+	public function testFunderWithoutNameIsSkipped(): void
+	{
+		// funderName is mandatory and must be non-empty in the OpenAIRE schema.
+		$this->assertNull($this->invokeFundingReferences([
+			$this->createFunder([], null, [['grantNumber' => '123']]),
+		]));
 	}
 }

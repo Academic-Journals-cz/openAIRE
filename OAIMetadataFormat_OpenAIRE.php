@@ -21,13 +21,9 @@ namespace APP\plugins\generic\openAIRE;
 
 use APP\core\Application;
 use APP\facades\Repo;
-use APP\plugins\generic\funding\classes\Funder;
-use APP\plugins\generic\funding\classes\FunderAward;
-use APP\plugins\generic\funding\classes\FunderAwardDAO;
-use APP\plugins\generic\funding\classes\FunderDAO;
 use PKP\core\PKPString;
-use PKP\db\DAOResultFactory;
 use PKP\facades\Locale;
+use PKP\funder\Funder;
 use PKP\oai\OAIMetadataFormat;
 use PKP\plugins\PluginRegistry;
 use PKP\db\DAORegistry;
@@ -110,8 +106,8 @@ class OAIMetadataFormat_OpenAIRE extends OAIMetadataFormat {
         }
         $response .= "</datacite:creators>\n";
 
-        //4. Funding Reference (MA) - from the Funding plugin, if installed and enabled
-        $fundingReferences = $this->getFundingReferences($article->getId());
+        //4. Funding Reference (MA)
+        $fundingReferences = $this->getFundingReferences($article);
         if ($fundingReferences) {
             $response .= $fundingReferences;
         }
@@ -326,33 +322,31 @@ class OAIMetadataFormat_OpenAIRE extends OAIMetadataFormat {
     }
 
     /**
-     * Get OpenAIRE oaire:fundingReferences XML for a submission's funders,
-     * if the Funding plugin (plugins/generic/funding) is installed and enabled.
+     * Get OpenAIRE oaire:fundingReferences XML for a submission's funders.
+     *
+     * One fundingReference per grant, since the schema allows each award element only once.
+     * The OpenAIRE 4.0 schema has no ROR funderIdentifierType, so RORs are typed "Other".
      */
-    protected function getFundingReferences(int $submissionId): ?string
+    protected function getFundingReferences(Submission $article): ?string
     {
-        if (!PluginRegistry::getPlugin('generic', 'FundingPlugin')) {
-            return null;
-        }
-        /** @var FunderDAO $funderDao */
-        $funderDao = DAORegistry::getDAO('FunderDAO');
-        /** @var FunderAwardDAO $funderAwardDao */
-        $funderAwardDao = DAORegistry::getDAO('FunderAwardDAO');
-        /** @var DAOResultFactory<Funder> $funders */
-        $funders = $funderDao->getBySubmissionId($submissionId);
+        $locale = $article->getData('locale');
         $fundingReferences = '';
-        while ($funder = $funders->next()) { /** @var Funder $funder */
-            $funderXml = "<oaire:funderName>" . htmlspecialchars($funder->getFunderName()) . "</oaire:funderName>\n";
-            if ($funder->getFunderIdentification()) {
-                $funderXml .= "<oaire:funderIdentifier funderIdentifierType=\"Crossref Funder ID\">" . htmlspecialchars($funder->getFunderIdentification()) . "</oaire:funderIdentifier>\n";
+        foreach ($article->getData('funders') ?? [] as $funder) { /** @var Funder $funder */
+            $funderName = trim((string) $funder->getLocalizedData('name', $locale));
+            if ($funderName === '') {
+                continue;
             }
-            $funderAwards = $funderAwardDao->getByFunderId($funder->getId());
+            $funderXml = "<oaire:funderName>" . htmlspecialchars($funderName) . "</oaire:funderName>\n";
+            if (!empty($funder->ror)) {
+                $funderXml .= "<oaire:funderIdentifier funderIdentifierType=\"Other\">" . htmlspecialchars($funder->ror) . "</oaire:funderIdentifier>\n";
+            }
             $hasAward = false;
-            while ($funderAward = $funderAwards->next()) { /** @var FunderAward $funderAward */
-                $hasAward = true;
-                $fundingReferences .= "<oaire:fundingReference>\n" . $funderXml
-                        . "<oaire:awardNumber>" . htmlspecialchars($funderAward->getFunderAwardNumber()) . "</oaire:awardNumber>\n"
-                        . "</oaire:fundingReference>\n";
+            foreach ($funder->grants ?? [] as $grant) {
+                $awardXml = $this->getAwardXml($grant);
+                if ($awardXml) {
+                    $hasAward = true;
+                    $fundingReferences .= "<oaire:fundingReference>\n" . $funderXml . $awardXml . "</oaire:fundingReference>\n";
+                }
             }
             if (!$hasAward) {
                 $fundingReferences .= "<oaire:fundingReference>\n" . $funderXml . "</oaire:fundingReference>\n";
@@ -362,6 +356,28 @@ class OAIMetadataFormat_OpenAIRE extends OAIMetadataFormat {
             return null;
         }
         return "<oaire:fundingReferences>\n" . $fundingReferences . "</oaire:fundingReferences>\n";
+    }
+
+    /**
+     * Get oaire:awardNumber and oaire:awardTitle XML for one grant.
+     *
+     * The grant DOI goes into awardURI; it only stands in as the award number when there is none.
+     */
+    protected function getAwardXml(array $grant): string
+    {
+        $grantNumber = trim((string) ($grant['grantNumber'] ?? ''));
+        $grantDoi = trim((string) ($grant['grantDoi'] ?? ''));
+        $grantName = trim((string) ($grant['grantName'] ?? ''));
+
+        $awardXml = '';
+        if ($grantNumber !== '' || $grantDoi !== '') {
+            $awardUri = $grantDoi !== '' ? ' awardURI="' . htmlspecialchars('https://doi.org/' . $grantDoi) . '"' : '';
+            $awardXml .= "<oaire:awardNumber" . $awardUri . ">" . htmlspecialchars($grantNumber !== '' ? $grantNumber : $grantDoi) . "</oaire:awardNumber>\n";
+        }
+        if ($grantName !== '') {
+            $awardXml .= "<oaire:awardTitle>" . htmlspecialchars($grantName) . "</oaire:awardTitle>\n";
+        }
+        return $awardXml;
     }
 
     /**
