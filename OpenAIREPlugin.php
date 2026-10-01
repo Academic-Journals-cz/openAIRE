@@ -197,6 +197,17 @@ class OpenAIREPlugin extends GenericPlugin {
         $sectionForm = $args[0];
         $resourceType = $sectionForm->getData('resourceType') ? $sectionForm->getData('resourceType') : '';
         $audience = $sectionForm->getData('audience') ? $sectionForm->getData('audience') : '';
+
+        // Only accept values from the known option lists; the form only
+        // ever offers these via a <select>, but that's a UI restriction,
+        // not a server-side guarantee, so re-validate here.
+        if ($resourceType !== '' && !array_key_exists($resourceType, $this->getCoarResourceType())) {
+            $resourceType = '';
+        }
+        if ($audience !== '' && !array_key_exists($audience, $this->getAudienceOptions())) {
+            $audience = '';
+        }
+
         if (!empty($resourceType) || !empty($audience)) {
             $context = Application::get()->getRequest()->getContext();
             $section = Repo::section()->get($sectionForm->getSectionId(), $context?->getId());
