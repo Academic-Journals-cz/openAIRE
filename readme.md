@@ -7,26 +7,17 @@ It is an alternation of the XML generator of the plugin and creating now metadat
 
 As of version 3.5.0-1, this plugin also provides the JATS XML metadata format (metadata_prefix "oai_openaire_jats") that was previously offered by the separate https://github.com/ojsde/openAIRE plugin. Enabling this plugin now covers both formats. The two plugins should not be enabled at the same time on the same journal: both independently add "Resource Type"/"Audience" fields to the section settings form, so enabling both would show duplicate fields there.
 
+As of version 3.6.0-0, the "oai_openaire_jats" format reuses the [jatsTemplate](https://github.com/pkp/jatsTemplate) plugin's own JATS generation instead of building its XML independently, and layers OpenAIRE/COAR-specific metadata on top. **The jatsTemplate plugin must be enabled** for "oai_openaire_jats" to work; if it isn't, that format returns an OAI-PMH `cannotDisseminateFormat` error. The "oai_openaire" (COAR/DataCite) format is unaffected and has no such dependency.
+
 ## License
 This plugin is licensed under the GNU General Public License v3. See the file LICENSE for the complete terms of this license.
 
 ## System Requirements
-OJS 3.5.0.x.
+OJS 3.6.0.x.
 PHP 8.2 or greater.
 
-For OJS 3.3.0/3.4.0, use the corresponding earlier release listed under "Latest Versions" below.
-
 ## Installation
-For OJS 3.5, please install this plugin via the Plugin Gallery rather than copying the files in manually. If you are switching over from the openAIREstandard plugin, installing via the Plugin Gallery ensures any leftover openAIREstandard data is cleaned up automatically as part of the install.
-
-## Latest Versions
-- Version 3.5.0-1 – Merged in the openAIRE (JATS) plugin's oai_openaire_jats format and renamed from openAIREstandard to OpenAIRE, taking over as the sole go-forward plugin for OpenAIRE OAI-PMH compliance (both oai_openaire and oai_openaire_jats); the old standalone https://github.com/ojsde/openAIRE plugin is retired and will not release for OJS >= 3.5
-- Version 1.0.2-0 – Support for OJS 3.5.0
-- Version 1.0.1-1 – Support for OJS 3.4.0
-- Version 1.0.0-1 – Support for OJS 3.3.0
-
-## Legacy version
-- Version 3.2.1.0 – Support for OJS 3.2.1
+Please install this plugin via the Plugin Gallery rather than copying the files in manually. If you are switching over from the openAIREstandard plugin, installing via the Plugin Gallery ensures any leftover openAIREstandard data is cleaned up automatically as part of the install.
 
 ## Example
 https://cyberpsychology.eu/oai?verb=ListRecords&metadataPrefix=oai_openaire

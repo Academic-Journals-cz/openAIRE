@@ -63,8 +63,6 @@ class OpenAIREPlugin extends GenericPlugin {
             Hook::add('sectionform::readuservars', [$this, 'readSectionFormFields']);
             Hook::add('sectionform::execute', [$this, 'executeSectionFormFields']);
 
-            $this->_registerTemplateResource();
-
             $this->cleanupOpenAIREstandardIfNeeded();
         }
         return $success;
@@ -197,6 +195,17 @@ class OpenAIREPlugin extends GenericPlugin {
         $sectionForm = $args[0];
         $resourceType = $sectionForm->getData('resourceType') ? $sectionForm->getData('resourceType') : '';
         $audience = $sectionForm->getData('audience') ? $sectionForm->getData('audience') : '';
+
+        // Only accept values from the known option lists; the form only
+        // ever offers these via a <select>, but that's a UI restriction,
+        // not a server-side guarantee, so re-validate here.
+        if ($resourceType !== '' && !array_key_exists($resourceType, $this->getCoarResourceTypes())) {
+            $resourceType = '';
+        }
+        if ($audience !== '' && !array_key_exists($audience, $this->getAudienceOptions())) {
+            $audience = '';
+        }
+
         if (!empty($resourceType) || !empty($audience)) {
             $context = Application::get()->getRequest()->getContext();
             $section = Repo::section()->get($sectionForm->getSectionId(), $context?->getId());
@@ -209,11 +218,19 @@ class OpenAIREPlugin extends GenericPlugin {
     }
 
     /**
-     * Get a COAR Resource Type by URI. If $uri is null return all.
+     * Get a COAR Resource Type label by URI.
      */
-    public function getCoarResourceType(?string $uri = null): array|string|null
+    public function getCoarResourceType(string $uri): ?string
     {
-        $resourceTypes = [
+        return $this->getCoarResourceTypes()[$uri] ?? null;
+    }
+
+    /**
+     * Get all COAR Resource Type Genres, keyed by URI.
+     */
+    protected function getCoarResourceTypes(): array
+    {
+        return [
             'http://purl.org/coar/resource_type/c_6501' => 'journal article',
             'http://purl.org/coar/resource_type/c_2df8fbb1' => 'research article',
             'http://purl.org/coar/resource_type/c_dcae04bc' => 'review article',
@@ -232,11 +249,6 @@ class OpenAIREPlugin extends GenericPlugin {
             'http://purl.org/coar/resource_type/c_816b' => 'preprint',
             'http://purl.org/coar/resource_type/c_1843' => 'other',
         ];
-        if ($uri) {
-            return $resourceTypes[$uri] ?? null;
-        } else {
-            return $resourceTypes;
-        }
     }
 
     public const COAR_ACCESS_RIGHTS = [
@@ -249,14 +261,21 @@ class OpenAIREPlugin extends GenericPlugin {
     /**
      * Get article access rights. Shared by both OAI metadata formats
      * (COAR/DataCite and JATS), which need identical access-rights logic.
+     *
+     * A publication may have no issue at all (e.g. a continuous-publication
+     * journal that doesn't use issues). Subscription-based access control is
+     * an issue-level concept, so without an issue there's no subscription
+     * gate to check - same as IssueAction::subscriptionRequired()'s guard and
+     * oaiJats's own no-issue handling, which both treat "no issue" as
+     * unrestricted access.
      */
-    public function getAccessRights(Journal $journal, Issue $issue, Publication $publication): ?string
+    public function getAccessRights(Journal $journal, ?Issue $issue, Publication $publication): ?string
     {
         $accessRights = null;
         if ($journal->getData('publishingMode') == Journal::PUBLISHING_MODE_OPEN) {
             $accessRights = 'openAccess';
         } else if ($journal->getData('publishingMode') == Journal::PUBLISHING_MODE_SUBSCRIPTION) {
-            if ($issue->getAccessStatus() == 0 || $issue->getAccessStatus() == Issue::ISSUE_ACCESS_OPEN) {
+            if (!$issue || $issue->getAccessStatus() == 0 || $issue->getAccessStatus() == Issue::ISSUE_ACCESS_OPEN) {
                 $accessRights = 'openAccess';
             } else if ($issue->getAccessStatus() == Issue::ISSUE_ACCESS_SUBSCRIPTION) {
                 if ($publication->getData('accessStatus') == Submission::ARTICLE_ACCESS_OPEN) {
@@ -303,7 +322,7 @@ class OpenAIREPlugin extends GenericPlugin {
      */
     protected function getResourceTypeOptions(): array
     {
-        $resourceTypeOptions = $this->getCoarResourceType(null);
+        $resourceTypeOptions = $this->getCoarResourceTypes();
         $chooseOne = __('common.chooseOne');
         $chooseOneOption = ['' => $chooseOne];
         $resourceTypeOptions = $chooseOneOption + $resourceTypeOptions;

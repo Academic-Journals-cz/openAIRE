@@ -115,5 +115,3 @@ class OpenAIREGatewayPlugin extends GatewayPlugin {
 		exit;
 	}
 }
-
-?>

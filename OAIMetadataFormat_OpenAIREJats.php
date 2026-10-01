@@ -16,19 +16,33 @@
  * @see OAI
  *
  * @brief OAI metadata format class -- OpenAIRE JATS
+ *
+ * Reuses the jatsTemplate plugin's generated JATS DOMDocument (the same way
+ * plugins/oaiMetadataFormats/oaiJats does) and layers OpenAIRE/COAR-specific
+ * metadata on top, instead of hand-building the whole document.
+ *
+ * Uses whatever JATS version jatsTemplate generates (currently 1.2) rather
+ * than pinning to 1.1 like the original hand-rolled OpenAIRE plugin and
+ * oaiJats used to. No confirmed requirement from OpenAIRE that 1.1 is
+ * needed - revisit before the OJS 3.6 release if that gets confirmed
+ * either way.
  */
 
 namespace APP\plugins\generic\openAIRE;
 
 use APP\core\Application;
-use APP\facades\Repo;
-use PKP\core\PKPString;
+use APP\issue\Issue;
+use APP\issue\IssueAction;
+use APP\oai\ojs\OAIDAO;
+use APP\publication\Publication;
+use DOMDocument;
+use DOMElement;
+use DOMXPath;
 use PKP\db\DAORegistry;
 use PKP\i18n\LocaleConversion;
 use PKP\oai\OAIMetadataFormat;
 use PKP\plugins\Hook;
 use PKP\plugins\PluginRegistry;
-use PKP\submission\GenreDAO;
 
 class OAIMetadataFormat_OpenAIREJats extends OAIMetadataFormat {
 
@@ -37,248 +51,169 @@ class OAIMetadataFormat_OpenAIREJats extends OAIMetadataFormat {
 	 */
 	function toXml($record, $format = null): string
 	{
-		$request = Application::get()->getRequest();
 		$article = $record->getData('article');
 		$journal = $record->getData('journal');
 		$section = $record->getData('section');
 		$issue = $record->getData('issue');
-		$articleId = $article->getId();
 		$publication = $article->getCurrentPublication();
-		$publicationLocale = $publication->getData('locale');
-		$printIssn = $journal->getData('printIssn');
-		$onlineIssn = $journal->getData('onlineIssn');
-		$publisherInstitution = $journal->getData('publisherInstitution');
-		$sectionTitle = $section->getTitle($journal->getPrimaryLocale());
-		$datePublished = $publication->getData('datePublished');
-		$publicationDoi = $publication->getDoi();
 		/** @var OpenAIREPlugin $parentPlugin */
 		$parentPlugin = PluginRegistry::getPlugin('generic', 'openaireplugin');
 		$accessRights = $parentPlugin->getAccessRights($journal, $issue, $publication);
 		$resourceType = ($section->getData('resourceType') ? $section->getData('resourceType') : 'http://purl.org/coar/resource_type/c_6501'); # COAR resource type URI, defaults to "journal article"
-		if (!$datePublished) $datePublished = $issue->getData('datePublished');
-		if ($datePublished) $datePublished = strtotime($datePublished);
 
-		$response = "
-		<article
-			dtd-version=\"1.1\"
-			xmlns:xlink=\"http://www.w3.org/1999/xlink\"
-			xmlns:mml=\"http://www.w3.org/1998/Math/MathML\"
-			xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"
-			xmlns:ali=\"http://www.niso.org/schemas/ali/1.0\"
-			xmlns=\"https://jats.nlm.nih.gov/publishing/1.1/\"
-			article-type=\"" . htmlspecialchars($this->mapCoarResourceTypeToJatsArticleType($resourceType)) . "\"
-			xml:lang=\"" . LocaleConversion::toBcp47($publicationLocale) . "\">
-		<front>
-		<journal-meta>
-			<journal-id journal-id-type=\"ojs\">" . htmlspecialchars($journal->getPath()) . "</journal-id>
-			<journal-title-group>
-			<journal-title xml:lang=\"" . LocaleConversion::toBcp47($journal->getPrimaryLocale()) . "\">" . htmlspecialchars($journal->getName($journal->getPrimaryLocale())) . "</journal-title>\n";
-		// Translated journal titles
-		foreach ($journal->getName(null) as $locale => $title) {
-			if ($locale == $journal->getPrimaryLocale()) continue;
-			$response .= "\t\t\t<trans-title-group xml:lang=\"" . LocaleConversion::toBcp47($locale) . "\"><trans-title>" . htmlspecialchars($title) . "</trans-title></trans-title-group>\n";
+		// Whether the requester is privileged enough to see pre-publication content,
+		// same check oaiJats uses.
+		$allowedPrePublicationAccess = $issue
+			? (new IssueAction())->allowedIssuePrePublicationAccess($journal, Application::get()->getRequest()->getUser())
+			: true;
+
+		// Get the jatsTemplate-generated document, the same way oaiJats does.
+		$candidateFiles = [];
+		$templateDoc = null;
+		Hook::call('OAIMetadataFormat_JATS::findJats', [&$this, &$record, &$candidateFiles, &$templateDoc]);
+		if (!$templateDoc) {
+			/** @var OAIDAO $oaiDao */
+			$oaiDao = DAORegistry::getDAO('OAIDAO');
+			$oaiDao->oai->error('cannotDisseminateFormat', 'Cannot disseminate format (JATS XML not available)');
+			exit();
 		}
-		$response .= ($journal->getAcronym($journal->getPrimaryLocale())?"\t\t\t<abbrev-journal-title xml:lang=\"" . LocaleConversion::toBcp47($journal->getPrimaryLocale()) . "\">" . htmlspecialchars($journal->getAcronym($journal->getPrimaryLocale())) . "</abbrev-journal-title>":'');
-		$response .= "\n\t\t\t</journal-title-group>\n";
 
-		$response .=
-			(!empty($onlineIssn)?"\t\t\t<issn pub-type=\"epub\">" . htmlspecialchars($onlineIssn) . "</issn>\n":'') .
-			(!empty($printIssn)?"\t\t\t<issn pub-type=\"ppub\">" . htmlspecialchars($printIssn) . "</issn>\n":'') .
-			($publisherInstitution != ''?"\t\t\t<publisher><publisher-name>" . htmlspecialchars($publisherInstitution) . "</publisher-name></publisher>\n":'') .
-			"\t\t</journal-meta>\n" .
-			"\t\t<article-meta>\n" .
-			"\t\t\t<article-id pub-id-type=\"publisher-id\">" . $article->getId() . "</article-id>\n" .
-			(!empty($publicationDoi)?"\t\t\t<article-id pub-id-type=\"doi\">" . htmlspecialchars($publicationDoi) . "</article-id>\n":'') .
-			(!empty($sectionTitle)?"\t\t\t<article-categories><subj-group xml:lang=\"" . LocaleConversion::toBcp47($journal->getPrimaryLocale()) . "\" subj-group-type=\"heading\"><subject>" . htmlspecialchars($sectionTitle) . "</subject></subj-group></article-categories>\n":'') .
-			"\t\t\t<title-group>\n" .
-			"\t\t\t\t<article-title xml:lang=\"" . LocaleConversion::toBcp47($publicationLocale) . "\">" . htmlspecialchars(strip_tags($publication->getData('title', $publicationLocale))) . "</article-title>\n";
-		if (!empty($subtitle = $publication->getData('subtitle', $publicationLocale))) $response .= "\t\t\t\t<subtitle xml:lang=\"" . LocaleConversion::toBcp47($publicationLocale) . "\">" . htmlspecialchars($subtitle) . "</subtitle>\n";
+		$this->augmentOpenAireMetadata($templateDoc, $issue, $publication, $parentPlugin, $accessRights, $resourceType, $allowedPrePublicationAccess);
 
-		// Translated article titles
-		foreach ((array) $publication->getData('title') as $locale => $title) {
-			if ($locale == $publicationLocale) continue;
-			if ($title){
-				$response .= "\t\t\t\t<trans-title-group xml:lang=\"" . LocaleConversion::toBcp47($locale) . "\">\n";
-				$response .= "\t\t\t\t\t<trans-title>" . htmlspecialchars(strip_tags($title)) . "</trans-title>\n";
-				if (!empty($subtitle = $publication->getData('subtitle', $locale))) $response .= "\t\t\t\t\t<trans-subtitle>" . htmlspecialchars($subtitle) . "</trans-subtitle>\n";
-				$response .= "\t\t\t\t\t</trans-title-group>\n";
+		return $templateDoc->saveXml($templateDoc->getElementsByTagName('article')->item(0));
+	}
+
+	/**
+	 * Layer OpenAIRE-specific metadata onto the jatsTemplate-generated
+	 * document. Only adds/adjusts what OpenAIRE needs.
+	 */
+	protected function augmentOpenAireMetadata(
+		DOMDocument $doc,
+		?Issue $issue,
+		Publication $publication,
+		OpenAIREPlugin $parentPlugin,
+		?string $accessRights,
+		string $resourceType,
+		bool $allowedPrePublicationAccess = false
+	): void
+	{
+		$xpath = new DOMXPath($doc);
+		$articleNode = $xpath->query('//article')->item(0);
+		$articleMetaNode = $xpath->query('//article/front/article-meta')->item(0);
+
+		// Remove author emails for requesters not allowed pre-publication access.
+		if (!$allowedPrePublicationAccess) {
+			$authorEmailNodes = $xpath->query(
+				'//article/front/article-meta/contrib-group/contrib/email'
+				. ' | //article/front/article-meta/author-notes/corresp/email'
+			);
+			foreach ($authorEmailNodes as $node) {
+				$node->parentNode->removeChild($node);
 			}
 		}
-		$response .=
-			"\t\t\t</title-group>\n" .
-			"\t\t\t<contrib-group content-type=\"author\">\n";
 
-		// Authors
-		$affiliations = array();
-		foreach ($publication->getData('authors') as $author) {
-			$affiliation = $author->getLocalizedAffiliationNamesAsString($publicationLocale);
-			$affiliationToken = $affiliation ? array_search($affiliation, $affiliations) : false;
-			if ($affiliation && $affiliationToken === false) {
-				$affiliationToken = 'aff-' . (count($affiliations)+1);
-				$affiliations[$affiliationToken] = $affiliation;
-			}
-			$response .=
-				"\t\t\t\t<contrib " . ($author->getPrimaryContact()?'corresp="yes" ':'') . ">\n" .
-				"\t\t\t\t\t<name name-style=\"western\">\n" .
-				"\t\t\t\t\t\t<surname>" . htmlspecialchars($author->getFamilyName($publicationLocale)) . "</surname>\n" .
-				"\t\t\t\t\t\t<given-names>" . htmlspecialchars($author->getGivenName($publicationLocale)) . "</given-names>\n" .
-				"\t\t\t\t\t</name>\n" .
-				($affiliationToken?"\t\t\t\t\t<xref ref-type=\"aff\" rid=\"$affiliationToken\" />\n":'') .
-				(($author->getOrcid() && $author->hasVerifiedOrcid())?"\t\t\t\t\t<contrib-id contrib-id-type=\"orcid\" authenticated=\"true\">" . htmlspecialchars($author->getOrcid()) . "</contrib-id>\n":'') .
-				"\t\t\t\t</contrib>\n";
-		}
-		$response .= "\t\t\t</contrib-group>\n";
-		foreach ($affiliations as $affiliationToken => $affiliation) {
-			$response .= "\t\t\t<aff id=\"$affiliationToken\"><institution content-type=\"orgname\">" . htmlspecialchars($affiliation) . "</institution></aff>\n";
+		$articleType = $this->mapCoarResourceTypeToJatsArticleType($resourceType);
+		if ($articleType) {
+			$articleNode->setAttribute('article-type', $articleType);
 		}
 
-		// Publication date
-		if ($datePublished) $response .=
-			"\t\t\t<pub-date date-type=\"pub\" publication-format=\"epub\">\n" .
-			"\t\t\t\t<day>" . date('d', $datePublished) . "</day>\n" .
-			"\t\t\t\t<month>" . date('m', $datePublished) . "</month>\n" .
-			"\t\t\t\t<year>" . date('Y', $datePublished) . "</year>\n" .
-			"\t\t\t</pub-date>\n";
-
-		// Issue details
-		if ($issue->getVolume() && $issue->getShowVolume())
-			$response .= "\t\t\t<volume>" . htmlspecialchars($issue->getVolume()) . "</volume>\n";
-		if ($issue->getNumber() && $issue->getShowNumber())
-			$response .= "\t\t\t<issue>" . htmlspecialchars($issue->getNumber()) . "</issue>\n";
-
-		// Page info, if available.
-		$pageInfo = $parentPlugin->getPageInfo($publication);
-		if ($pageInfo){
-			$response .=
-				"\t\t\t\t<fpage>" . $pageInfo['fpage'] . "</fpage>\n" .
-				"\t\t\t\t<lpage>" . $pageInfo['lpage'] . "</lpage>\n";
+		// OpenAIRE has always linked to full text via self-uri, never embedded it.
+		$bodyNode = $xpath->query('//article/body')->item(0);
+		if ($bodyNode) {
+			$bodyNode->parentNode->removeChild($bodyNode);
 		}
 
-		// Fetch funding data from other plugins if available
-		$fundingReferences = null;
-		Hook::call('OAIMetadataFormat_OpenAIRE::findFunders', [&$articleId, &$fundingReferences]);
-		if ($fundingReferences){
-			$response .= $fundingReferences;
-		}
-
-		// Copyright, license and other permissions
-		$copyrightYear = $publication->getData('copyrightYear');
-		$copyrightHolder = $publication->getLocalizedData('copyrightHolder', $publicationLocale);
-		$licenseUrl = $publication->getData('licenseUrl');
-		$ccBadge = Application::get()->getCCLicenseBadge($licenseUrl, $publicationLocale);
+		// Access rights: permissions/ali:free_to_read + COAR custom-meta.
 		$openAccessDate = null;
-		if ($accessRights == 'embargoedAccess') {
+		if ($accessRights === 'embargoedAccess' && $issue?->getOpenAccessDate()) {
 			$openAccessDate = date('Y-m-d', strtotime($issue->getOpenAccessDate()));
 		}
-		if ($copyrightYear || $copyrightHolder || $licenseUrl || $ccBadge || $openAccessDate || $accessRights == "openAccess" ) $response .=
-			"\t\t\t<permissions>\n" .
-			(($copyrightYear||$copyrightHolder)?"\t\t\t\t<copyright-statement>" . htmlspecialchars(__('submission.copyrightStatement', array('copyrightYear' => $copyrightYear, 'copyrightHolder' => $copyrightHolder))) . "</copyright-statement>\n":'') .
-			($copyrightYear?"\t\t\t\t<copyright-year>" . htmlspecialchars($copyrightYear) . "</copyright-year>\n":'') .
-			($copyrightHolder?"\t\t\t\t<copyright-holder>" . htmlspecialchars($copyrightHolder) . "</copyright-holder>\n":'') .
-			($licenseUrl?"\t\t\t\t<license xlink:href=\"" . htmlspecialchars($licenseUrl) . "\">\n" .
-				($ccBadge?"\t\t\t\t\t<license-p>" . strip_tags($ccBadge) . "</license-p>\n":'') .
-			"\t\t\t\t</license>\n":'') .
-			($openAccessDate?"\t\t\t\t<ali:free_to_read xmlns:ali=\"http://www.niso.org/schemas/ali/1.0\" start_date=\"" . htmlspecialchars($openAccessDate) . "\" />\n":'') .
-			($accessRights == "openAccess"?"\t\t\t\t<ali:free_to_read xmlns:ali=\"http://www.niso.org/schemas/ali/1.0\" />\n":'') .
-			"\t\t\t</permissions>\n";
+		if ($accessRights === 'openAccess' || $openAccessDate) {
+			$articleNode->setAttribute('xmlns:ali', 'http://www.niso.org/schemas/ali/1.0');
 
-		// landing page link
-		$response .= "\t\t\t<self-uri xlink:href=\"" . htmlspecialchars($request->getDispatcher()->url(
-			$request, Application::ROUTE_PAGE, $journal->getPath(), 'article', 'view', [$article->getBestId()], null, null, true, ''
-		)) . "\" />\n";
+			$permissionsNode = $xpath->query('//article/front/article-meta/permissions')->item(0);
+			if (!$permissionsNode) {
+				$permissionsNode = $doc->createElement('permissions');
+				// JATS puts permissions before self-uri, which jatsTemplate always generates.
+				$selfUriNode = $xpath->query('//article/front/article-meta/self-uri')->item(0);
+				$articleMetaNode->insertBefore($permissionsNode, $selfUriNode);
+			}
 
-		// full text links
-		$galleys = $publication->getData('galleys');
-		if ($galleys) {
-			/** @var GenreDAO $genreDao */
-			$genreDao = DAORegistry::getDAO('GenreDAO');
-			$primaryGenres = $genreDao->getPrimaryByContextId($journal->getId())->toArray();
-			$primaryGenreIds = array_map(function($genre) {
-				return $genre->getId();
-			}, $primaryGenres);
-			foreach ($galleys as $galley) {
-				$isRemote = (bool) $galley->getData('urlRemote');
-				$submissionFile = null;
-				if (!$isRemote && $submissionFileId = $galley->getData('submissionFileId')) {
-					$submissionFile = Repo::submissionFile()->get($submissionFileId);
-				}
-				if (!$isRemote && !$submissionFile) {
+			$freeToReadNode = $doc->createElement('ali:free_to_read');
+			if ($openAccessDate) {
+				$freeToReadNode->setAttribute('start_date', $openAccessDate);
+			}
+			$permissionsNode->appendChild($freeToReadNode);
+		}
+
+		$coarResourceLabel = $parentPlugin->getCoarResourceType($resourceType);
+		if ($accessRights || $coarResourceLabel) {
+			$customMetaGroupNode = $xpath->query('//article/front/article-meta/custom-meta-group')->item(0);
+			if (!$customMetaGroupNode) {
+				// custom-meta-group is last in the article-meta content model, so
+				// appending it is always correct - no anchor needed.
+				$customMetaGroupNode = $doc->createElement('custom-meta-group');
+				$articleMetaNode->appendChild($customMetaGroupNode);
+			}
+
+			if ($accessRights) {
+				$coarAccessRights = OpenAIREPlugin::COAR_ACCESS_RIGHTS;
+				$customMetaGroupNode->appendChild($this->createCustomMeta(
+					$doc,
+					'access-right',
+					$coarAccessRights[$accessRights]['label'],
+					$coarAccessRights[$accessRights]['url']
+				));
+			}
+			if ($coarResourceLabel) {
+				$customMetaGroupNode->appendChild($this->createCustomMeta(
+					$doc,
+					'resource-type',
+					$coarResourceLabel,
+					$resourceType
+				));
+			}
+		}
+
+		// Subjects (distinct from keywords, which jatsTemplate already emits).
+		// kwd-group must precede funding-group/counts/custom-meta-group per the
+		// JATS content model; insert before the first of those if any exist,
+		// else append (also correctly stacks multiple locales in order, since
+		// each new group lands right before the same anchor as the last one).
+		if ($allSubjects = $publication->getData('subjects')) {
+			$kwdGroupAnchor = $xpath->query(
+				'//article/front/article-meta/funding-group'
+				. ' | //article/front/article-meta/counts'
+				. ' | //article/front/article-meta/custom-meta-group'
+			)->item(0);
+			foreach ($allSubjects as $locale => $subjects) {
+				if (empty($subjects)) {
 					continue;
 				}
-				if ($isRemote || in_array($submissionFile->getData('genreId'), $primaryGenreIds)) {
-					$galleyUrl = $request->getDispatcher()->url(
-						$request, Application::ROUTE_PAGE, $journal->getPath(), 'article', 'download',
-						[$article->getBestId(), $galley->getBestGalleyId()], null, null, true, ''
-					);
-					$fileType = $isRemote ? null : $submissionFile->getData('mimetype');
-					$response .= "\t\t\t<self-uri" . ($fileType ? " content-type=\"" . htmlspecialchars($fileType) . "\"" : '') . " xlink:href=\"" . htmlspecialchars($galleyUrl) . "\" />\n";
+				$kwdGroupNode = $doc->createElement('kwd-group');
+				$kwdGroupNode->setAttribute('xml:lang', LocaleConversion::toBcp47($locale));
+				foreach ($subjects as $subject) {
+					$kwdGroupNode->appendChild($doc->createElement('kwd', htmlspecialchars(trim($subject['name']))));
+				}
+				if ($kwdGroupAnchor) {
+					$articleMetaNode->insertBefore($kwdGroupNode, $kwdGroupAnchor);
+				} else {
+					$articleMetaNode->appendChild($kwdGroupNode);
 				}
 			}
 		}
+	}
 
-		// Subjects
-		if ($allSubjects = $publication->getData('subjects')) {
-			foreach ($allSubjects as $locale => $subjects) {
-				if (empty($subjects)) continue;
-				$response .= "\t\t\t<kwd-group xml:lang=\"" . LocaleConversion::toBcp47($locale) . "\">\n";
-				foreach ($subjects as $subject) $response .= "\t\t\t\t<kwd>" . htmlspecialchars($subject['name']) . "</kwd>\n";
-				$response .= "\t\t\t</kwd-group>\n";
-			}
-		}
-
-		// Keywords
-		if ($allKeywords = $publication->getData('keywords')) {
-			foreach ($allKeywords as $locale => $keywords) {
-				if (empty($keywords)) continue;
-				$response .= "\t\t\t<kwd-group xml:lang=\"" . LocaleConversion::toBcp47($locale) . "\">\n";
-				foreach ($keywords as $keyword) $response .= "\t\t\t\t<kwd>" . htmlspecialchars($keyword['name']) . "</kwd>\n";
-				$response .= "\t\t\t</kwd-group>\n";
-			}
-		}
-
-		// abstract
-		if ($publication->getData('abstract', $publicationLocale)) {
-			$abstract = PKPString::html2text($publication->getData('abstract', $publicationLocale));
-			$response .= "\t\t\t<abstract xml:lang=\"" . LocaleConversion::toBcp47($publicationLocale) . "\"><p>" . htmlspecialchars($abstract) . "</p></abstract>\n";
-		}
-		// Include translated abstracts
-		foreach ((array) $publication->getData('abstract') as $locale => $abstract) {
-			if ($locale == $publicationLocale) continue;
-			if ($abstract){
-				$abstract = PKPString::html2text($abstract);
-				$response .= "\t\t\t<trans-abstract xml:lang=\"" . LocaleConversion::toBcp47($locale) . "\"><p>" . htmlspecialchars($abstract) . "</p></trans-abstract>\n";
-			}
-		}
-
-		// Page count
-		$response .=
-			($pageInfo?"\t\t\t<counts><page-count count=\"" . (int) $pageInfo['pagecount'] . "\" /></counts>\n":'');
-
-		// OpenAIRE COAR Access Rights and OpenAIRE COAR Resource Type
-		$coarAccessRights = OpenAIREPlugin::COAR_ACCESS_RIGHTS;
-		$coarResourceLabel = $parentPlugin->getCoarResourceType($resourceType);
-
-		if ($accessRights || $coarResourceLabel){
-			$response .= "\t\t\t<custom-meta-group>\n";
-			if ($accessRights) $response .=
-				"\t\t\t\t<custom-meta specific-use=\"access-right\">\n" .
-				"\t\t\t\t\t<meta-name>" . $coarAccessRights[$accessRights]['label'] . "</meta-name>\n" .
-				"\t\t\t\t\t<meta-value>" . $coarAccessRights[$accessRights]['url'] . "</meta-value>\n" .
-				"\t\t\t\t</custom-meta>\n";
-			if ($coarResourceLabel) $response .=
-				"\t\t\t\t<custom-meta specific-use=\"resource-type\">\n" .
-				"\t\t\t\t\t<meta-name>" . $coarResourceLabel . "</meta-name>\n" .
-				"\t\t\t\t\t<meta-value>" . $resourceType . "</meta-value>\n" .
-				"\t\t\t\t</custom-meta>\n";
-			$response .=  "\t\t\t</custom-meta-group>\n";
-		}
-
-		$response .=
-			"\t\t</article-meta>\n" .
-			"\t</front>\n" .
-			"</article>";
-
-		return $response;
+	/**
+	 * Build a <custom-meta specific-use="..."> element with a meta-name/meta-value pair.
+	 */
+	protected function createCustomMeta(DOMDocument $doc, string $specificUse, string $metaName, string $metaValue): DOMElement
+	{
+		$customMetaNode = $doc->createElement('custom-meta');
+		$customMetaNode->setAttribute('specific-use', $specificUse);
+		$customMetaNode->appendChild($doc->createElement('meta-name', htmlspecialchars($metaName)));
+		$customMetaNode->appendChild($doc->createElement('meta-value', htmlspecialchars($metaValue)));
+		return $customMetaNode;
 	}
 
 	/**

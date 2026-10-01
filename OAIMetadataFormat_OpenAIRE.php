@@ -21,13 +21,9 @@ namespace APP\plugins\generic\openAIRE;
 
 use APP\core\Application;
 use APP\facades\Repo;
-use APP\plugins\generic\funding\classes\Funder;
-use APP\plugins\generic\funding\classes\FunderAward;
-use APP\plugins\generic\funding\classes\FunderAwardDAO;
-use APP\plugins\generic\funding\classes\FunderDAO;
 use PKP\core\PKPString;
-use PKP\db\DAOResultFactory;
 use PKP\facades\Locale;
+use PKP\funder\Funder;
 use PKP\oai\OAIMetadataFormat;
 use PKP\plugins\PluginRegistry;
 use PKP\db\DAORegistry;
@@ -36,6 +32,11 @@ use PKP\submission\GenreDAO;
 use PKP\submissionFile\SubmissionFile;
 use PKP\i18n\LocaleConversion;
 use PKP\core\PKPApplication;
+use PKP\core\PKPRequest;
+use PKP\publication\enums\VersionRelationType;
+use APP\journal\Journal;
+use APP\publication\Publication;
+use APP\submission\Submission;
 
 class OAIMetadataFormat_OpenAIRE extends OAIMetadataFormat {
 
@@ -64,7 +65,7 @@ class OAIMetadataFormat_OpenAIRE extends OAIMetadataFormat {
         $accessRights = $parentPlugin->getAccessRights($journal, $issue, $publication);
         $resourceType = ($section->getData('resourceType') ? $section->getData('resourceType') : 'http://purl.org/coar/resource_type/c_6501'); # COAR resource type URI, defaults to "journal article"
         $audience = $section->getData('audience');
-        if (!$datePublished) {
+        if (!$datePublished && $issue) {
             $datePublished = $issue->getData('datePublished');
         }
         if ($datePublished) {
@@ -105,8 +106,8 @@ class OAIMetadataFormat_OpenAIRE extends OAIMetadataFormat {
         }
         $response .= "</datacite:creators>\n";
 
-        //4. Funding Reference (MA) - from the Funding plugin, if installed and enabled
-        $fundingReferences = $this->getFundingReferences($article->getId());
+        //4. Funding Reference (MA)
+        $fundingReferences = $this->getFundingReferences($article);
         if ($fundingReferences) {
             $response .= $fundingReferences;
         }
@@ -116,6 +117,12 @@ class OAIMetadataFormat_OpenAIRE extends OAIMetadataFormat {
             $response .= "<datacite:alternateIdentifiers>\n"
                     . "<datacite:alternateIdentifier alternateIdentifierType=\"DOI\">" . htmlspecialchars($publicationDoi) . "</datacite:alternateIdentifier>\n"
                     . "</datacite:alternateIdentifiers>\n";
+        }
+
+        //6. Related Identifier (R) - the immediately preceding published version, if any
+        $relatedIdentifiers = $this->getRelatedIdentifiersXml($publication, $article, $journal, $request);
+        if ($relatedIdentifiers) {
+            $response .= $relatedIdentifiers;
         }
 
         //8. Languages (MA) - taken from galley locales
@@ -135,10 +142,10 @@ class OAIMetadataFormat_OpenAIRE extends OAIMetadataFormat {
 
         //ISSN + eISSN
         if ($printIssn) {
-            $response .= "<dc:source>ISSN: " . $printIssn . "</dc:source>";
+            $response .= "<dc:source>ISSN: " . htmlspecialchars($printIssn) . "</dc:source>";
         }
         if ($onlineIssn) {
-            $response .= "<dc:source>eISSN: " . $onlineIssn . "</dc:source>";
+            $response .= "<dc:source>eISSN: " . htmlspecialchars($onlineIssn) . "</dc:source>";
         }
 
         //9. Publisher (MA)
@@ -171,7 +178,7 @@ class OAIMetadataFormat_OpenAIRE extends OAIMetadataFormat {
         }
 
         //14. Resource Identifier (M) - landing page link
-        $response .= "<datacite:identifier identifierType=\"URL\">" . $request->getDispatcher()->url($request, PKPApplication::ROUTE_PAGE, null, 'article', 'view', [$article->getBestId()], urlLocaleForPage: '') . "</datacite:identifier>\n";
+        $response .= "<datacite:identifier identifierType=\"URL\">" . htmlspecialchars($request->getDispatcher()->url($request, PKPApplication::ROUTE_PAGE, $journal->getPath(), 'article', 'view', [$article->getBestId()], urlLocaleForPage: '')) . "</datacite:identifier>\n";
 
         //15. Access Rights (M) - OpenAIRE COAR Access Rights
         $coarAccessRights = OpenAIREPlugin::COAR_ACCESS_RIGHTS;
@@ -242,7 +249,7 @@ class OAIMetadataFormat_OpenAIRE extends OAIMetadataFormat {
             $galley = $mainGalley['galley'];
             $galleyFile = $mainGalley['file'];
             if ($galleyFile->getData('fileId')) {
-                $response .= "<oaire:file accessRightsURI=\"" . $coarAccessRights[$accessRights]['url'] . "\" mimeType=\"" . htmlspecialchars($galleyFile->getData('mimetype')) . "\" objectType=\"fulltext\">" . htmlspecialchars($request->url($journal->getPath(), 'article', 'download', [$article->getBestId(), $galley->getBestGalleyId()], null, null, true)) . "</oaire:file>\n";
+                $response .= "<oaire:file accessRightsURI=\"" . $coarAccessRights[$accessRights]['url'] . "\" mimeType=\"" . htmlspecialchars($galleyFile->getData('mimetype')) . "\" objectType=\"fulltext\">" . htmlspecialchars($request->getDispatcher()->url($request, PKPApplication::ROUTE_PAGE, $journal->getPath(), 'article', 'download', [$article->getBestId(), $galley->getBestGalleyId()], null, null, true, '')) . "</oaire:file>\n";
             }
         }
 
@@ -250,12 +257,12 @@ class OAIMetadataFormat_OpenAIRE extends OAIMetadataFormat {
         $response .= "<oaire:citationTitle>" . htmlspecialchars($journal->getName($journal->getPrimaryLocale())) . "</oaire:citationTitle>\n";
 
         //25. Citation Volume (R)
-        if ($issue->getVolume() && $issue->getShowVolume()) {
+        if ($issue && $issue->getVolume() && $issue->getShowVolume()) {
             $response .= "<oaire:citationVolume>" . htmlspecialchars($issue->getVolume()) . "</oaire:citationVolume>\n";
         }
 
         //26. Citation Issue (R)
-        if ($issue->getNumber() && $issue->getShowNumber()) {
+        if ($issue && $issue->getNumber() && $issue->getShowNumber()) {
             $response .= "<oaire:citationIssue>" . htmlspecialchars($issue->getNumber()) . "</oaire:citationIssue>\n";
         }
 
@@ -276,33 +283,70 @@ class OAIMetadataFormat_OpenAIRE extends OAIMetadataFormat {
     }
 
     /**
-     * Get OpenAIRE oaire:fundingReferences XML for a submission's funders,
-     * if the Funding plugin (plugins/generic/funding) is installed and enabled.
+     * Get datacite:relatedIdentifiers XML linking to the immediately preceding
+     * published version, if any, per OpenAIRE guideline v4 element 6 (Related
+     * Identifier).
      */
-    protected function getFundingReferences(int $submissionId): ?string
+    protected function getRelatedIdentifiersXml(Publication $publication, Submission $article, Journal $journal, PKPRequest $request): ?string
     {
-        if (!PluginRegistry::getPlugin('generic', 'FundingPlugin')) {
+        $versionRelation = Repo::publication()->getVersionRelation($publication, $article, $journal);
+        if (!$versionRelation) {
             return null;
         }
-        /** @var FunderDAO $funderDao */
-        $funderDao = DAORegistry::getDAO('FunderDAO');
-        /** @var FunderAwardDAO $funderAwardDao */
-        $funderAwardDao = DAORegistry::getDAO('FunderAwardDAO');
-        /** @var DAOResultFactory<Funder> $funders */
-        $funders = $funderDao->getBySubmissionId($submissionId);
+
+        $relationType = match ($versionRelation->relationType) {
+            VersionRelationType::IS_NEW_VERSION_OF => 'IsNewVersionOf',
+            VersionRelationType::IS_PREVIOUS_VERSION_OF => 'IsPreviousVersionOf',
+            VersionRelationType::IS_VERSION_OF => 'IsVersionOf',
+        };
+
+        if ($versionRelation->doi) {
+            $relatedIdentifierType = 'DOI';
+            $relatedIdentifierValue = $versionRelation->doi;
+        } else {
+            $relatedIdentifierType = 'URL';
+            $relatedIdentifierValue = $request->getDispatcher()->url(
+                $request,
+                PKPApplication::ROUTE_PAGE,
+                $journal->getPath(),
+                'article',
+                'view',
+                [$article->getBestId(), 'version', $versionRelation->publicationId],
+                urlLocaleForPage: ''
+            );
+        }
+
+        return "<datacite:relatedIdentifiers>\n"
+                . "<datacite:relatedIdentifier relatedIdentifierType=\"" . $relatedIdentifierType . "\" relationType=\"" . $relationType . "\">" . htmlspecialchars($relatedIdentifierValue) . "</datacite:relatedIdentifier>\n"
+                . "</datacite:relatedIdentifiers>\n";
+    }
+
+    /**
+     * Get OpenAIRE oaire:fundingReferences XML for a submission's funders.
+     *
+     * One fundingReference per grant, since the schema allows each award element only once.
+     * The OpenAIRE 4.0 schema has no ROR funderIdentifierType, so RORs are typed "Other".
+     */
+    protected function getFundingReferences(Submission $article): ?string
+    {
+        $locale = $article->getData('locale');
         $fundingReferences = '';
-        while ($funder = $funders->next()) { /** @var Funder $funder */
-            $funderXml = "<oaire:funderName>" . htmlspecialchars($funder->getFunderName()) . "</oaire:funderName>\n";
-            if ($funder->getFunderIdentification()) {
-                $funderXml .= "<oaire:funderIdentifier funderIdentifierType=\"Crossref Funder ID\">" . htmlspecialchars($funder->getFunderIdentification()) . "</oaire:funderIdentifier>\n";
+        foreach ($article->getData('funders') ?? [] as $funder) { /** @var Funder $funder */
+            $funderName = trim((string) $funder->getLocalizedData('name', $locale));
+            if ($funderName === '') {
+                continue;
             }
-            $funderAwards = $funderAwardDao->getByFunderId($funder->getId());
+            $funderXml = "<oaire:funderName>" . htmlspecialchars($funderName) . "</oaire:funderName>\n";
+            if (!empty($funder->ror)) {
+                $funderXml .= "<oaire:funderIdentifier funderIdentifierType=\"Other\">" . htmlspecialchars($funder->ror) . "</oaire:funderIdentifier>\n";
+            }
             $hasAward = false;
-            while ($funderAward = $funderAwards->next()) { /** @var FunderAward $funderAward */
-                $hasAward = true;
-                $fundingReferences .= "<oaire:fundingReference>\n" . $funderXml
-                        . "<oaire:awardNumber>" . htmlspecialchars($funderAward->getFunderAwardNumber()) . "</oaire:awardNumber>\n"
-                        . "</oaire:fundingReference>\n";
+            foreach ($funder->grants ?? [] as $grant) {
+                $awardXml = $this->getAwardXml($grant);
+                if ($awardXml) {
+                    $hasAward = true;
+                    $fundingReferences .= "<oaire:fundingReference>\n" . $funderXml . $awardXml . "</oaire:fundingReference>\n";
+                }
             }
             if (!$hasAward) {
                 $fundingReferences .= "<oaire:fundingReference>\n" . $funderXml . "</oaire:fundingReference>\n";
@@ -312,6 +356,28 @@ class OAIMetadataFormat_OpenAIRE extends OAIMetadataFormat {
             return null;
         }
         return "<oaire:fundingReferences>\n" . $fundingReferences . "</oaire:fundingReferences>\n";
+    }
+
+    /**
+     * Get oaire:awardNumber and oaire:awardTitle XML for one grant.
+     *
+     * The grant DOI goes into awardURI; it only stands in as the award number when there is none.
+     */
+    protected function getAwardXml(array $grant): string
+    {
+        $grantNumber = trim((string) ($grant['grantNumber'] ?? ''));
+        $grantDoi = trim((string) ($grant['grantDoi'] ?? ''));
+        $grantName = trim((string) ($grant['grantName'] ?? ''));
+
+        $awardXml = '';
+        if ($grantNumber !== '' || $grantDoi !== '') {
+            $awardUri = $grantDoi !== '' ? ' awardURI="' . htmlspecialchars('https://doi.org/' . $grantDoi) . '"' : '';
+            $awardXml .= "<oaire:awardNumber" . $awardUri . ">" . htmlspecialchars($grantNumber !== '' ? $grantNumber : $grantDoi) . "</oaire:awardNumber>\n";
+        }
+        if ($grantName !== '') {
+            $awardXml .= "<oaire:awardTitle>" . htmlspecialchars($grantName) . "</oaire:awardTitle>\n";
+        }
+        return $awardXml;
     }
 
     /**
