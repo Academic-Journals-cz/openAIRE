@@ -193,27 +193,25 @@ class OpenAIREPlugin extends GenericPlugin {
     public function executeSectionFormFields(string $hookName, array $args): void
     {
         $sectionForm = $args[0];
-        $resourceType = $sectionForm->getData('resourceType') ? $sectionForm->getData('resourceType') : '';
-        $audience = $sectionForm->getData('audience') ? $sectionForm->getData('audience') : '';
+        $resourceType = $sectionForm->getData('resourceType') ?: null;
+        $audience = $sectionForm->getData('audience') ?: null;
 
         // Only accept values from the known option lists; the form only
         // ever offers these via a <select>, but that's a UI restriction,
         // not a server-side guarantee, so re-validate here.
-        if ($resourceType !== '' && !array_key_exists($resourceType, $this->getCoarResourceTypes())) {
-            $resourceType = '';
+        if ($resourceType !== null && !array_key_exists($resourceType, $this->getCoarResourceTypes())) {
+            $resourceType = null;
         }
-        if ($audience !== '' && !array_key_exists($audience, $this->getAudienceOptions())) {
-            $audience = '';
+        if ($audience !== null && !array_key_exists($audience, $this->getAudienceOptions())) {
+            $audience = null;
         }
 
-        if (!empty($resourceType) || !empty($audience)) {
-            $context = Application::get()->getRequest()->getContext();
-            $section = Repo::section()->get($sectionForm->getSectionId(), $context?->getId());
-            if ($section) {
-                $section->setData('resourceType', $resourceType);
-                $section->setData('audience', $audience);
-                Repo::section()->edit($section, []);
-            }
+        $context = Application::get()->getRequest()->getContext();
+        $section = Repo::section()->get($sectionForm->getSectionId(), $context?->getId());
+        if ($section) {
+            $section->setData('resourceType', $resourceType);
+            $section->setData('audience', $audience);
+            Repo::section()->edit($section, []);
         }
     }
 
@@ -253,9 +251,9 @@ class OpenAIREPlugin extends GenericPlugin {
 
     public const COAR_ACCESS_RIGHTS = [
         'openAccess' => ['label' => 'open access', 'url' => 'http://purl.org/coar/access_right/c_abf2'],
-        'embargoedAccess' => ['label' => 'embargoed access', 'url' => 'http://purl.org/coar/access_right/c_abf2'],
-        'restrictedAccess' => ['label' => 'restricted access', 'url' => 'http://purl.org/coar/access_right/c_abf2'],
-        'metadataOnlyAccess' => ['label' => 'metadata only access', 'url' => 'http://purl.org/coar/access_right/c_abf2'],
+        'embargoedAccess' => ['label' => 'embargoed access', 'url' => 'http://purl.org/coar/access_right/c_f1cf'],
+        'restrictedAccess' => ['label' => 'restricted access', 'url' => 'http://purl.org/coar/access_right/c_16ec'],
+        'metadataOnlyAccess' => ['label' => 'metadata only access', 'url' => 'http://purl.org/coar/access_right/c_14cb'],
     ];
 
     /**
@@ -281,11 +279,14 @@ class OpenAIREPlugin extends GenericPlugin {
                 if ($publication->getData('accessStatus') == Submission::ARTICLE_ACCESS_OPEN) {
                     $accessRights = 'openAccess';
                 } else if ($issue->getOpenAccessDate() != null) {
-                    $accessRights = 'embargoedAccess';
+                    // Same check as IssueAction::subscriptionRequired(): the embargo ends on the open access date
+                    $accessRights = strtotime($issue->getOpenAccessDate()) > time() ? 'embargoedAccess' : 'openAccess';
                 } else {
                     $accessRights = 'metadataOnlyAccess';
                 }
             }
+        } else if ($journal->getData('publishingMode') == Journal::PUBLISHING_MODE_NONE) {
+            $accessRights = 'metadataOnlyAccess';
         }
         if ($journal->getData('restrictSiteAccess') == 1 || $journal->getData('restrictArticleAccess') == 1) {
             $accessRights = 'restrictedAccess';

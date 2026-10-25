@@ -375,6 +375,39 @@ class OAIMetadataFormat_OpenAIREJatsTest extends PKPTestCase
 		$this->assertEquals('metadataOnlyAccess', $plugin->getAccessRights($journal, $issue, $this->createPublication()));
 	}
 
+	public function testGetAccessRightsEmbargoEndsOnOpenAccessDate(): void
+	{
+		$journal = $this->createJournal(['publishingMode' => Journal::PUBLISHING_MODE_SUBSCRIPTION]);
+		$plugin = new OpenAIREPlugin();
+
+		$futureIssue = $this->createIssue(['accessStatus' => Issue::ISSUE_ACCESS_SUBSCRIPTION, 'openAccessDate' => date('Y-m-d', strtotime('+1 year'))]);
+		$this->assertEquals('embargoedAccess', $plugin->getAccessRights($journal, $futureIssue, $this->createPublication()));
+
+		$pastIssue = $this->createIssue(['accessStatus' => Issue::ISSUE_ACCESS_SUBSCRIPTION, 'openAccessDate' => date('Y-m-d', strtotime('-1 year'))]);
+		$this->assertEquals('openAccess', $plugin->getAccessRights($journal, $pastIssue, $this->createPublication()));
+	}
+
+	public function testGetAccessRightsPublishingModeNoneIsMetadataOnly(): void
+	{
+		$journal = $this->createJournal(['publishingMode' => Journal::PUBLISHING_MODE_NONE]);
+		$plugin = new OpenAIREPlugin();
+
+		$this->assertEquals('metadataOnlyAccess', $plugin->getAccessRights($journal, null, $this->createPublication()));
+	}
+
+	public function testCoarAccessRightsUris(): void
+	{
+		$this->assertEquals(
+			[
+				'openAccess' => 'http://purl.org/coar/access_right/c_abf2',
+				'embargoedAccess' => 'http://purl.org/coar/access_right/c_f1cf',
+				'restrictedAccess' => 'http://purl.org/coar/access_right/c_16ec',
+				'metadataOnlyAccess' => 'http://purl.org/coar/access_right/c_14cb',
+			],
+			array_map(fn (array $accessRight) => $accessRight['url'], OpenAIREPlugin::COAR_ACCESS_RIGHTS)
+		);
+	}
+
 	public function testMapCoarResourceTypeToJatsArticleType(): void
 	{
 		$format = new OAIMetadataFormat_OpenAIREJats('oai_openaire_jats', '', '');

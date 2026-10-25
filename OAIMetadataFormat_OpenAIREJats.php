@@ -63,9 +63,7 @@ class OAIMetadataFormat_OpenAIREJats extends OAIMetadataFormat {
 
 		// Whether the requester is privileged enough to see pre-publication content,
 		// same check oaiJats uses.
-		$allowedPrePublicationAccess = $issue
-			? (new IssueAction())->allowedIssuePrePublicationAccess($journal, Application::get()->getRequest()->getUser())
-			: true;
+		$allowedPrePublicationAccess = (new IssueAction())->allowedIssuePrePublicationAccess($journal, Application::get()->getRequest()->getUser());
 
 		// Get the jatsTemplate-generated document, the same way oaiJats does.
 		$candidateFiles = [];

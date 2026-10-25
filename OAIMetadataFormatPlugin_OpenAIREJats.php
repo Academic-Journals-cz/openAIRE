@@ -56,11 +56,11 @@ class OAIMetadataFormatPlugin_OpenAIREJats extends OAIMetadataFormatPlugin {
 
 	public static function getSchema(): string
 	{
-		return 'https://jats.nlm.nih.gov/publishing/0.4/xsd/JATS-journalpublishing0.xsd';
+		return 'https://jats.nlm.nih.gov/publishing/1.2/xsd/JATS-journalpublishing1.xsd';
 	}
 
 	public static function getNamespace(): string
 	{
-		return 'http://jats.nlm.nih.gov';
+		return 'https://jats.nlm.nih.gov/publishing/1.2/';
 	}
 }

@@ -21,6 +21,8 @@ namespace APP\plugins\generic\openAIRE;
 
 use APP\core\Application;
 use APP\facades\Repo;
+use PKP\author\contributorRole\ContributorRoleIdentifier;
+use PKP\author\contributorRole\ContributorType;
 use PKP\core\PKPString;
 use PKP\facades\Locale;
 use PKP\funder\Funder;
@@ -54,10 +56,10 @@ class OAIMetadataFormat_OpenAIRE extends OAIMetadataFormat {
         $publication = $article->getCurrentPublication();
 
         $galleys = $publication->getData('galleys');
-        $printIssn = $journal->getData('printIssn');
-        $onlineIssn = $journal->getData('onlineIssn');
+        $printIssn = $publication->getPrintIssn($journal);
+        $onlineIssn = $publication->getOnlineIssn($journal);
         $publicationLocale = $publication->getData('locale');
-        $publisherInstitution = $journal->getData('publisherInstitution');
+        $publisherInstitution = $publication->getPublisher($journal);
         $datePublished = $publication->getData('datePublished');
         $publicationDoi = $publication->getDoi();
         /** @var OpenAIREPlugin $parentPlugin */
@@ -77,34 +79,75 @@ class OAIMetadataFormat_OpenAIRE extends OAIMetadataFormat {
 
         //1. Title (M) - Translated article titles
         $response .= "<datacite:titles>\n"
-                . "<datacite:title xml:lang=\"" . htmlspecialchars(LocaleConversion::toBcp47($publicationLocale)) . "\">" . htmlspecialchars(strip_tags($publication->getData('title', $publicationLocale))) . "</datacite:title>\n";
+                . "<datacite:title xml:lang=\"" . htmlspecialchars(LocaleConversion::toBcp47($publicationLocale)) . "\">" . htmlspecialchars(PKPString::html2text($publication->getData('title', $publicationLocale))) . "</datacite:title>\n";
 
         if (!empty($subtitle = $publication->getData('subtitle', $publicationLocale))) {
-            $response .= "<datacite:title xml:lang=\"" . htmlspecialchars(LocaleConversion::toBcp47($publicationLocale)) . "\" titleType=\"subtitle\">" . htmlspecialchars(strip_tags($subtitle)) . "</datacite:title>\n";
+            $response .= "<datacite:title xml:lang=\"" . htmlspecialchars(LocaleConversion::toBcp47($publicationLocale)) . "\" titleType=\"Subtitle\">" . htmlspecialchars(PKPString::html2text($subtitle)) . "</datacite:title>\n";
         }
         foreach ((array) $publication->getData('title') as $locale => $title) {
             if ($title != '' && $locale != $publicationLocale) {
-                $response .= "<datacite:title xml:lang=\"" . htmlspecialchars(LocaleConversion::toBcp47($locale)) . "\">" . htmlspecialchars(strip_tags($title)) . "</datacite:title>\n";
+                $response .= "<datacite:title xml:lang=\"" . htmlspecialchars(LocaleConversion::toBcp47($locale)) . "\">" . htmlspecialchars(PKPString::html2text($title)) . "</datacite:title>\n";
                 if (!empty($subtitle = $publication->getData('subtitle', $locale))) {
-                    $response .= "<datacite:title xml:lang=\"" . htmlspecialchars(LocaleConversion::toBcp47($locale)) . "\" titleType=\"Subtitle\">" . htmlspecialchars(strip_tags($subtitle)) . "</datacite:title>\n";
+                    $response .= "<datacite:title xml:lang=\"" . htmlspecialchars(LocaleConversion::toBcp47($locale)) . "\" titleType=\"Subtitle\">" . htmlspecialchars(PKPString::html2text($subtitle)) . "</datacite:title>\n";
                 }
             }
         }
         $response .= "</datacite:titles>\n";
 
-        //2. Creator (M) - Authors
-        $response .= "<datacite:creators>\n";
+        //2. Creator (M) - contributors with the Author role
+        //3. Contributor (MA) - contributors with other roles
+        $creators = $contributors = '';
         foreach ($publication->getData('authors') as $author) {
             $affiliation = $author->getLocalizedAffiliationNamesAsString($publicationLocale);
-            $response .= "<datacite:creator>\n" .
-                    "<datacite:creatorName nameType=\"Personal\">" . htmlspecialchars($author->getFamilyName($publicationLocale) . ", " . $author->getGivenName($publicationLocale)) . "</datacite:creatorName>\n" .
-                    "<datacite:givenName>" . htmlspecialchars($author->getGivenName($publicationLocale)) . "</datacite:givenName>\n" .
-                    "<datacite:familyName>" . htmlspecialchars($author->getFamilyName($publicationLocale)) . "</datacite:familyName>\n" .
-                    ($author->getOrcid() ? "<datacite:nameIdentifier nameIdentifierScheme=\"ORCID\" schemeURI=\"http://orcid.org\">" . htmlspecialchars($author->getOrcid()) . "</datacite:nameIdentifier>\n" : '') .
-                    ($affiliation ? "<datacite:affiliation>" . htmlspecialchars($affiliation) . "</datacite:affiliation>\n" : '') .
-                    "</datacite:creator>\n";
+            $affiliationXml = $affiliation ? "<datacite:affiliation>" . htmlspecialchars($affiliation) . "</datacite:affiliation>\n" : '';
+            $contributorType = $author->getData('contributorType');
+            if ($contributorType === ContributorType::ANONYMOUS->getName()) {
+                // DataCite's controlled value for "known to be unknown"
+                $name = ':unkn';
+                $nameTypeAttr = '';
+                $detailsXml = '';
+            } elseif ($contributorType === ContributorType::ORGANIZATION->getName()) {
+                $name = $author->getLocalizedOrganizationName($publicationLocale);
+                $nameTypeAttr = ' nameType="Organizational"';
+                $detailsXml = $affiliationXml;
+            } else {
+                // Same locale fallback as getFullName(), so the name parts match the full name
+                $nameLocale = $author->getGivenName($publicationLocale) ? $publicationLocale : $author->getDefaultLocale();
+                $familyName = $author->getFamilyName($nameLocale);
+                $name = $author->getFullName(false, true, $publicationLocale);
+                $nameTypeAttr = ' nameType="Personal"';
+                $detailsXml = "<datacite:givenName>" . htmlspecialchars($author->getGivenName($nameLocale)) . "</datacite:givenName>\n" .
+                        ($familyName ? "<datacite:familyName>" . htmlspecialchars($familyName) . "</datacite:familyName>\n" : '') .
+                        ($author->getOrcid() ? "<datacite:nameIdentifier nameIdentifierScheme=\"ORCID\" schemeURI=\"http://orcid.org\">" . htmlspecialchars($author->getOrcid()) . "</datacite:nameIdentifier>\n" : '') .
+                        $affiliationXml;
+            }
+
+            $roleIds = $author->getContributorRoleIdentifiers();
+            if (in_array(ContributorRoleIdentifier::AUTHOR->getName(), $roleIds)) {
+                $creators .= "<datacite:creator>\n" .
+                        "<datacite:creatorName{$nameTypeAttr}>" . htmlspecialchars($name) . "</datacite:creatorName>\n" .
+                        $detailsXml .
+                        "</datacite:creator>\n";
+            }
+            // The OpenAIRE 4.0 schema has no "Translator" contributorType
+            $dataciteContributorTypes = array_unique(array_map(
+                fn (string $roleId): string => $roleId === ContributorRoleIdentifier::EDITOR->getName() ? 'Editor' : 'Other',
+                array_diff($roleIds, [ContributorRoleIdentifier::AUTHOR->getName()])
+            ));
+            foreach ($dataciteContributorTypes as $dataciteContributorType) {
+                $contributors .= "<datacite:contributor contributorType=\"{$dataciteContributorType}\">\n" .
+                        "<datacite:contributorName{$nameTypeAttr}>" . htmlspecialchars($name) . "</datacite:contributorName>\n" .
+                        $detailsXml .
+                        "</datacite:contributor>\n";
+            }
         }
-        $response .= "</datacite:creators>\n";
+        // A creator is mandatory; use DataCite's controlled value for "value unavailable"
+        $response .= "<datacite:creators>\n"
+                . ($creators ?: "<datacite:creator>\n<datacite:creatorName>:unav</datacite:creatorName>\n</datacite:creator>\n")
+                . "</datacite:creators>\n";
+        if ($contributors) {
+            $response .= "<datacite:contributors>\n" . $contributors . "</datacite:contributors>\n";
+        }
 
         //4. Funding Reference (MA)
         $fundingReferences = $this->getFundingReferences($article);
@@ -167,9 +210,11 @@ class OAIMetadataFormat_OpenAIRE extends OAIMetadataFormat {
         //12. description - abstract + translated abstracts
         $abstracts = $publication->getData('abstract') ?: [];
         foreach ($abstracts as $locale => $abstract) {
-            if ($abstract != '')
-                $abstract = PKPString::html2text($abstract);
-            $response .= "<dc:description xml:lang=\"" . htmlspecialchars(LocaleConversion::toBcp47($locale)) . "\">" . htmlspecialchars($abstract) . "</dc:description>\n";
+            if ($abstract == '') {
+                continue;
+            }
+            $abstract = PKPString::html2text($abstract);
+            $response .="<dc:description xml:lang=\"" . htmlspecialchars(LocaleConversion::toBcp47($locale)) . "\">" . htmlspecialchars($abstract) . "</dc:description>\n";
         }
 
         //13. Format (R)
@@ -224,7 +269,8 @@ class OAIMetadataFormat_OpenAIRE extends OAIMetadataFormat {
         }
         if ($licenseUrl) {
             $ccLabel = $this->getCCLicenseLabel($licenseUrl, $publicationLocale);
-            $response .= "<oaire:licenseCondition startDate=\"" . date('Y-m-d', $openAccessDate) . "\" uri=\"" . htmlspecialchars($licenseUrl) . "\">" . strip_tags($ccLabel ?? $licenseUrl) . "</oaire:licenseCondition>\n";
+            $startDate = $openAccessDate ? " startDate=\"" . date('Y-m-d', $openAccessDate) . "\"" : '';
+            $response .= "<oaire:licenseCondition" . $startDate . " uri=\"" . htmlspecialchars($licenseUrl) . "\">" . strip_tags($ccLabel ?? $licenseUrl) . "</oaire:licenseCondition>\n";
         }
 
         //19. Coverage (R)
@@ -254,7 +300,7 @@ class OAIMetadataFormat_OpenAIRE extends OAIMetadataFormat {
         }
 
         //24. Citation Title (R)
-        $response .= "<oaire:citationTitle>" . htmlspecialchars($journal->getName($journal->getPrimaryLocale())) . "</oaire:citationTitle>\n";
+        $response .= "<oaire:citationTitle>" . htmlspecialchars($publication->getPrimaryContextName($journal)) . "</oaire:citationTitle>\n";
 
         //25. Citation Volume (R)
         if ($issue && $issue->getVolume() && $issue->getShowVolume()) {
@@ -427,11 +473,10 @@ class OAIMetadataFormat_OpenAIRE extends OAIMetadataFormat {
         if (!isset($genres[$genreId])) {
             $genres[$genreId] = $genreDao->getById($genreId);
         }
-        assert($genres[$genreId]);
         $genre = $genres[$genreId];
 
-        // The genre doesn't look like a main submission document.
-        if ($genre->getCategory() != Genre::GENRE_CATEGORY_DOCUMENT) {
+        // The genre is missing or doesn't look like a main submission document.
+        if (!$genre || $genre->getCategory() != Genre::GENRE_CATEGORY_DOCUMENT) {
             return false;
         }
         return true;
